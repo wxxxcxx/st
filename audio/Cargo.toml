@@ -1,0 +1,10 @@
+[package]
+name = "audio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = "2.0.12"
+# Cross-platform audio capture
+cpal = { git = "https://github.com/Kree0/cpal.git", branch = "master" }
+hound = "3.5.1"
