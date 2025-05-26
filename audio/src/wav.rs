@@ -7,7 +7,7 @@ use std::vec;
 use cpal::{FromSample, Sample};
 use hound::WavWriter;
 
-use crate::recorder::AudioConfig;
+use crate::recorder::OutputFormat;
 
 fn sample_format(format: cpal::SampleFormat) -> hound::SampleFormat {
     if format.is_float() {
@@ -17,7 +17,7 @@ fn sample_format(format: cpal::SampleFormat) -> hound::SampleFormat {
     }
 }
 
-fn wav_spec_from_config(config: &AudioConfig) -> hound::WavSpec {
+fn wav_spec_from_config(config: &OutputFormat) -> hound::WavSpec {
     hound::WavSpec {
         channels: config.channels,
         sample_rate: config.sample_rate,
@@ -31,7 +31,7 @@ pub struct Wav {
 }
 
 impl Wav {
-    pub fn new(path: &str, config: &AudioConfig) -> Self {
+    pub fn new(path: &str, config: &OutputFormat) -> Self {
         let wav_spec = wav_spec_from_config(config);
         let file = File::create(path).expect("Failed to create WAV file");
         let file = BufWriter::new(file);

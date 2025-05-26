@@ -1,16 +1,14 @@
 use audio::recorder::{CpalRecorder, Recorder};
 use audio::wav::Wav;
-use futures_util::{SinkExt, StreamExt, future, pin_mut};
+use gummy::Gummy;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use std::thread::sleep;
+use std::time::Duration;
 use std::{sync::mpsc::channel, thread::spawn};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::signal::unix::{SignalKind, signal};
-use tokio::time::{Duration, sleep};
-use tokio_tungstenite::{connect_async, connect_async_tls_with_config};
-use tungstenite::Message;
-use tungstenite::Utf8Bytes;
-use tungstenite::client::IntoClientRequest;
+use tokio::runtime::Builder;
+
+mod gummy;
 
 const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/recorded.wav");
 
@@ -49,118 +47,77 @@ impl ConvertMessage {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let mut recorder = CpalRecorder::default();
-    let config = recorder
-        .default_config()
-        .expect("Failed to get default config");
+    let output_format = CpalRecorder::output_format().expect("Failed to get default audio config");
     let (tx, rx) = channel();
     let output = audio::recorder::ChannelRecorderOutput { sender: tx };
-    let wav = Arc::new(Mutex::new(Some(Wav::new(PATH, &config))));
+    let wav = Arc::new(Mutex::new(Some(Wav::new(PATH, &output_format))));
     let wav_cloned = Arc::clone(&wav);
 
-    // let (mut ftx, frx) = futures_channel::mpsc::channel(1024);
+    let (ttx, trx) = tokio::sync::mpsc::channel(1024);
 
-    let api_key = std::env::var("API_KEY").expect("API_KEY 未设置");
-    let mut request = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
-        .into_client_request()
-        .unwrap();
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {}", api_key).parse().unwrap(),
-    );
-    request
-        .headers_mut()
-        .insert("user-agent", "app".parse().unwrap());
-    request
-        .headers_mut()
-        .insert("X-DashScope-WorkSpace", "app".parse().unwrap());
-    request
-        .headers_mut()
-        .insert("X-DashScope-DataInspection", "enable".parse().unwrap());
-    let (stream, _) = connect_async_tls_with_config(request, None, false, None)
-        .await
-        .expect("Failed to connect WebSocket");
-    let (mut writer, reader) = stream.split();
-    let message = ConvertMessage::new("run-task".to_string());
-    let message = serde_json::to_string(&message).expect("Failed to serialize message");
-    println!(
-        "[{}] Sending message: {}",
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-        message
-    );
-    writer
-        .send(Message::Text(message.into()))
-        .await
-        .expect("Failed to send message");
+    spawn(move || {
+        let rt = Builder::new_multi_thread()
+            .worker_threads(3)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let api_key = std::env::var("API_KEY").expect("API_KEY 未设置");
+            let gummy = Gummy::connect(api_key).await.unwrap();
+            match gummy {
+                Gummy::Ready(_) => {
+                    gummy.start().await.expect("Failed to start Gummy");
+                }
+                Gummy::Processing(_) => {
+                    gummy.bind(trx).await.expect("Failed to bind Gummy");
+                }
+                Gummy::Closed => panic!("Gummy connection closed unexpectedly"),
+                Gummy::Error(err) => panic!("Failed to connect: {}", err),
+            };
+        });
+    });
 
-    reader
-        .for_each(|message| async {
-            match message {
-                Ok(Message::Binary(data)) => {
-                    println!(
-                        "[{}] Received {} bytes of audio data",
-                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                        data.len(),
-                    );
+    spawn(move || {
+        while let Ok(data) = rx.recv() {
+            println!(
+                "[{}] Received {} bytes of audio data",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                data.len(),
+            );
+
+            if let Ok(mut wav) = wav_cloned.lock() {
+                if let Some(ref mut wav) = *wav {
+                    wav.write::<i16, i16>(&data)
+                        .expect("Failed to write to WAV");
                 }
-                Ok(Message::Text(data)) => {
-                    println!(
-                        "[{}] Received text message: {}",
-                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                        data
-                    );
-                }
-                Ok(Message::Close(_)) => {
-                    println!("WebSocket connection closed");
-                }
-                Err(e) => {
-                    eprintln!("WebSocket error: {}", e);
-                }
-                _ => {}
+            } else {
+                eprintln!("Failed to lock WAV writer");
             }
-        })
-        .await;
+            let mut bytes = Vec::with_capacity(data.len() * 2);
+            for &sample in data.iter() {
+                bytes.extend_from_slice(&sample.to_ne_bytes());
+            }
+            Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    ttx.send(bytes).await.expect("Failed to send data to Gummy");
+                })
+        }
+    });
 
-    // spawn(move || {
-    //     let mut count = 0;
-    //     while let Ok(data) = rx.recv() {
-    //         count += 1;
-    //         println!(
-    //             "{} [{}] Received {} bytes of audio data",
-    //             count,
-    //             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-    //             data.len(),
-    //         );
-    //         ftx.try_send(data.clone())
-    //             .expect("Failed to send data to WebSocket");
-    //         if let Ok(mut wav) = wav_cloned.lock() {
-    //             if let Some(ref mut wav) = *wav {
-    //                 wav.write::<i32, f32>(&data)
-    //                     .expect("Failed to write to WAV");
-    //             }
-    //         } else {
-    //             eprintln!("Failed to lock WAV writer");
-    //         }
-    //     }
-    // });
-    // recorder.start(output).expect("Failed to start recorder");
-    // let mut sigint = signal(SignalKind::interrupt()).expect("无法注册信号处理器");
-    // tokio::spawn(async {
-    //     loop {
-    //         sleep(Duration::from_secs(2)).await;
-    //     }
-    // });
-    // // 等待信号
-    // sigint.recv().await;
-    // recorder.stop().expect("Failed to stop recorder");
-
-    // let mut wav = wav.lock().expect("Failed to lock WAV writer");
-    // if let Some(wav) = wav.take() {
-    //     wav.save().expect("Failed to save WAV file");
-    //     println!("WAV file saved to {}", PATH);
-    // } else {
-    //     eprintln!("WAV writer was already taken");
-    // }
+    recorder.start(output).expect("Failed to start recorder");
+    println!("Recorder started, waiting for audio data...");
+    sleep(Duration::from_secs(10));
+    recorder.stop().expect("Failed to stop recorder");
+    let mut wav = wav.lock().expect("Failed to lock WAV writer");
+    if let Some(wav) = wav.take() {
+        wav.save().expect("Failed to save WAV file");
+        println!("WAV file saved to {}", PATH);
+    } else {
+        eprintln!("WAV writer was already taken");
+    }
 }
