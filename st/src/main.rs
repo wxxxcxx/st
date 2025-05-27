@@ -1,4 +1,4 @@
-use audio::recorder::{CpalRecorder, Recorder};
+use audio::recorder::{CpalRecorder, OutputFormat, Recorder, RecorderSampleFormat};
 use audio::wav::Wav;
 use gummy::Gummy;
 use serde::{Deserialize, Serialize};
@@ -52,32 +52,38 @@ fn main() {
     let output_format = CpalRecorder::output_format().expect("Failed to get default audio config");
     let (tx, rx) = channel();
     let output = audio::recorder::ChannelRecorderOutput { sender: tx };
-    let wav = Arc::new(Mutex::new(Some(Wav::new(PATH, &output_format))));
+    let wav = Arc::new(Mutex::new(Some(Wav::new(
+        PATH,
+        &OutputFormat {
+            sample_format: RecorderSampleFormat::I16,
+            ..output_format
+        },
+    ))));
     let wav_cloned = Arc::clone(&wav);
 
-    let (ttx, trx) = tokio::sync::mpsc::channel(1024);
+    // let (ttx, trx) = tokio::sync::mpsc::channel(1024);
 
-    spawn(move || {
-        let rt = Builder::new_multi_thread()
-            .worker_threads(3)
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async move {
-            let api_key = std::env::var("API_KEY").expect("API_KEY 未设置");
-            let gummy = Gummy::connect(api_key).await.unwrap();
-            match gummy {
-                Gummy::Ready(_) => {
-                    gummy.start().await.expect("Failed to start Gummy");
-                }
-                Gummy::Processing(_) => {
-                    gummy.bind(trx).await.expect("Failed to bind Gummy");
-                }
-                Gummy::Closed => panic!("Gummy connection closed unexpectedly"),
-                Gummy::Error(err) => panic!("Failed to connect: {}", err),
-            };
-        });
-    });
+    // spawn(move || {
+    //     let rt = Builder::new_multi_thread()
+    //         .worker_threads(3)
+    //         .enable_all()
+    //         .build()
+    //         .unwrap();
+    //     rt.block_on(async move {
+    //         let api_key = std::env::var("API_KEY").expect("API_KEY 未设置");
+    //         let gummy = Gummy::connect(api_key).await.unwrap();
+    //         match gummy {
+    //             Gummy::Ready(_) => {
+    //                 gummy.start().await.expect("Failed to start Gummy");
+    //             }
+    //             Gummy::Processing(_) => {
+    //                 gummy.bind(trx).await.expect("Failed to bind Gummy");
+    //             }
+    //             Gummy::Closed => panic!("Gummy connection closed unexpectedly"),
+    //             Gummy::Error(err) => panic!("Failed to connect: {}", err),
+    //         };
+    //     });
+    // });
 
     spawn(move || {
         while let Ok(data) = rx.recv() {
@@ -95,17 +101,18 @@ fn main() {
             } else {
                 eprintln!("Failed to lock WAV writer");
             }
+
             let mut bytes = Vec::with_capacity(data.len() * 2);
             for &sample in data.iter() {
                 bytes.extend_from_slice(&sample.to_ne_bytes());
             }
-            Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    ttx.send(bytes).await.expect("Failed to send data to Gummy");
-                })
+            // Builder::new_current_thread()
+            //     .enable_all()
+            //     .build()
+            //     .unwrap()
+            //     .block_on(async {
+            //         ttx.send(bytes).await.expect("Failed to send data to Gummy");
+            //     })
         }
     });
 

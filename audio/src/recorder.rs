@@ -80,6 +80,7 @@ impl CpalRecorder {
             return Ok(device);
         }
     }
+
 }
 
 impl Recorder for CpalRecorder {
@@ -90,7 +91,7 @@ impl Recorder for CpalRecorder {
         let device = CpalRecorder::get_default_device()?;
         let default_config = CpalRecorder::output_format()?;
         let config = StreamConfig {
-            channels: default_config.channels,
+            channels: 1,
             sample_rate: SampleRate(default_config.sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
@@ -144,6 +145,13 @@ impl Recorder for CpalRecorder {
         let config = device
             .default_output_config()
             .expect("Not found default output config");
+        println!(
+            "Default device: {}, channels: {}, sample rate: {}, sample format: {:?}",
+            device.name().unwrap_or_else(|_| "Unknown".to_string()),
+            config.channels(),
+            config.sample_rate().0,
+            config.sample_format()
+        );
         Ok(OutputFormat {
             channels: config.channels() as RecorderChannelCount,
             sample_rate: config.sample_rate().0 as RecorderSampleRate,

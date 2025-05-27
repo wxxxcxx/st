@@ -1,12 +1,10 @@
 use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, StreamExt, future, pin_mut};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::result::Result::Ok;
 use tokio_tungstenite::{WebSocketStream, connect_async_tls_with_config};
-use tungstenite::Utf8Bytes;
+use tungstenite::Message;
 use tungstenite::client::IntoClientRequest;
-use tungstenite::http::Request;
-use tungstenite::{Bytes, Message};
 
 #[derive(Serialize, Deserialize)]
 pub struct RequestHeader {
@@ -93,7 +91,6 @@ pub struct Processing {
     writer: WSWriter,
     reader: WSReader,
     task_id: String,
-    buffer: Vec<u8>,
 }
 
 pub enum Gummy {
@@ -121,7 +118,7 @@ impl Gummy {
         let (writer, reader) = stream.split();
         Ok(Gummy::Ready(Ready { writer, reader }))
     }
-    pub async fn start(self) -> Result<Self, anyhow::Error> {
+    pub async fn start(self, data: &[u8]) -> Result<Self, anyhow::Error> {
         match self {
             Gummy::Ready(mut ready) => loop {
                 let message = RequestMessage::new("run-task");
@@ -152,7 +149,6 @@ impl Gummy {
                                 .as_str()
                                 .unwrap_or_default()
                                 .to_string(),
-                            buffer: Vec::new(),
                         }));
                     } else {
                         return Ok(Gummy::Error(format!("Unexpected event: {}", event)));
@@ -161,6 +157,25 @@ impl Gummy {
                     panic!("Unexpected message type: {:?}", message);
                 }
             },
+            Gummy::Processing(mut processing) => {
+                println!(
+                    "[{}] Sending initial data...",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                );
+                processing
+                    .writer
+                    .send(Message::Binary(data.to_vec().into()))
+                    .await?;
+                processing
+                    .writer
+                    .send(Message::Text(
+                        serde_json::to_string(&RequestMessage::new("finish-task"))
+                            .unwrap()
+                            .into(),
+                    ))
+                    .await?;
+                Ok(Gummy::Processing(processing))
+            }
             _ => Err(anyhow::anyhow!("Gummy is not in a ready state.")),
         }
     }
