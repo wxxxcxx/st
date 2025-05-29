@@ -2,6 +2,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::result::Result::Ok;
+use tokio::task;
 use tokio_tungstenite::{WebSocketStream, connect_async_tls_with_config};
 use tungstenite::Message;
 use tungstenite::client::IntoClientRequest;
@@ -43,11 +44,11 @@ pub struct RequestMessage {
 }
 
 impl RequestMessage {
-    pub fn new(event: &str) -> Self {
+    pub fn new(event: &str, task_id: &str) -> Self {
         match event {
             "run-task" => RequestMessage {
                 header: RequestHeader {
-                    task_id: uuid::Uuid::new_v4().to_string(),
+                    task_id: task_id.to_string(),
                     action: "run-task".to_string(),
                     streaming: "duplex".to_string(),
                 },
@@ -67,6 +68,21 @@ impl RequestMessage {
                     function: Some("recognition".to_string()),
                 },
             },
+            "finish-task" => RequestMessage {
+                header: RequestHeader {
+                    task_id: task_id.to_string(),
+                    action: "finish-task".to_string(),
+                    streaming: "duplex".to_string(),
+                },
+                payload: RequestPayload {
+                    model: None,
+                    parameters: None,
+                    input: RequestInput {},
+                    task: None,
+                    task_group: None,
+                    function: None,
+                },
+            },
             _ => panic!("Unsupported event type: {}", event),
         }
     }
@@ -82,20 +98,20 @@ pub struct Initial {
     api_key: String,
 }
 
-pub struct Ready {
+pub struct ReadyForTask {
     writer: WSWriter,
     reader: WSReader,
 }
 
-pub struct Processing {
+pub struct InTask {
     writer: WSWriter,
     reader: WSReader,
     task_id: String,
 }
 
 pub enum Gummy {
-    Ready(Ready),
-    Processing(Processing),
+    ReadyForTask(ReadyForTask),
+    InTask(InTask),
     Closed,
     Error(String),
 }
@@ -116,12 +132,13 @@ impl Gummy {
             .insert("X-DashScope-DataInspection", "enable".parse()?);
         let (stream, _) = connect_async_tls_with_config(request, None, false, None).await?;
         let (writer, reader) = stream.split();
-        Ok(Gummy::Ready(Ready { writer, reader }))
+        Ok(Gummy::ReadyForTask(ReadyForTask { writer, reader }))
     }
-    pub async fn start(self, data: &[u8]) -> Result<Self, anyhow::Error> {
+    pub async fn start_task(self) -> Result<Self, anyhow::Error> {
         match self {
-            Gummy::Ready(mut ready) => loop {
-                let message = RequestMessage::new("run-task");
+            Gummy::ReadyForTask(mut ready) => {
+                let task_id = uuid::Uuid::new_v4().to_string();
+                let message = RequestMessage::new("run-task", &task_id);
                 ready
                     .writer
                     .send(Message::Text(
@@ -142,7 +159,7 @@ impl Gummy {
                         .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
                     if event == "task-started" {
                         println!("Task started successfully.");
-                        return Ok(Gummy::Processing(Processing {
+                        return Ok(Gummy::InTask(InTask {
                             writer: ready.writer,
                             reader: ready.reader,
                             task_id: response["header"]["task_id"]
@@ -156,79 +173,48 @@ impl Gummy {
                 } else {
                     panic!("Unexpected message type: {:?}", message);
                 }
-            },
-            Gummy::Processing(mut processing) => {
-                println!(
-                    "[{}] Sending initial data...",
-                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-                );
-                processing
-                    .writer
-                    .send(Message::Binary(data.to_vec().into()))
-                    .await?;
-                processing
-                    .writer
-                    .send(Message::Text(
-                        serde_json::to_string(&RequestMessage::new("finish-task"))
-                            .unwrap()
-                            .into(),
-                    ))
-                    .await?;
-                Ok(Gummy::Processing(processing))
             }
             _ => Err(anyhow::anyhow!("Gummy is not in a ready state.")),
         }
     }
 
-    pub async fn bind(
-        self,
-        mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    ) -> Result<Self, anyhow::Error> {
+    pub async fn send_data(&mut self, data: &[u8]) -> Result<(), anyhow::Error> {
         match self {
-            Gummy::Processing(mut processing) => {
-                loop {
-                    tokio::select! {
-                       send_data = rx.recv() => {
-                            println!(
-                                "[{}] Sending data...",
-                                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-                            );
-                            if let Some(data) = send_data {
-                                if let Err(e) = processing.writer.send(Message::Binary(data.into())).await {
-                                    eprintln!("Error sending data: {}", e);
-                                }
-                            } else {
-                                println!("No more data to send, exiting.");
-                                break;
-                            }
-                        },
-                        message = processing.reader.next() => {
-                            println!(
-                                "[{}] Receiving message...",
-                                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-                            );
-                            match message {
-                                Some(Result::Ok(Message::Text(text))) => {
-                                    println!(
-                                        "[{}] Received message: {}",
-                                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                                        text
-                                    );
-                                    let data: Vec<i32> = serde_json::from_str(&text)?;
-                                    // Process the received data as needed
-                                    println!("Received data: {:?}", data);
-                                }
-                                _ => {
-                                    eprintln!("Received unexpected message type or error.");
-                                    continue;
-                                }
-                            }
-                        },
-                    }
-                }
-                Ok(Gummy::Closed)
+            Gummy::InTask(in_task) => {
+                println!(
+                    "[{}] Sending data...",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                );
+                in_task
+                    .writer
+                    .send(Message::Binary(data.to_vec().into()))
+                    .await?;
+                Ok(())
             }
-            _ => Err(anyhow::anyhow!("Gummy is not in a ready state.")),
+            _ => Err(anyhow::anyhow!("Gummy is not in task state.")),
+        }
+    }
+
+    pub async fn finish_task(self) -> Result<Self, anyhow::Error> {
+        match self {
+            Gummy::InTask(mut in_task) => {
+                let message = RequestMessage::new("finish_task", &in_task.task_id);
+                println!(
+                    "[{}] Finishing task...",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                );
+                in_task
+                    .writer
+                    .send(Message::Text(
+                        serde_json::to_string(&message).unwrap().into(),
+                    ))
+                    .await?;
+                Ok(Gummy::ReadyForTask(ReadyForTask {
+                    writer: in_task.writer,
+                    reader: in_task.reader,
+                }))
+            }
+            _ => Err(anyhow::anyhow!("Gummy is not in a processing state.")),
         }
     }
 }

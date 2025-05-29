@@ -10,8 +10,6 @@ use tokio::runtime::Builder;
 
 mod gummy;
 
-const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/recorded.wav");
-
 #[derive(Serialize, Deserialize)]
 pub struct ConvertMessageHeader {
     task_id: String,
@@ -48,15 +46,20 @@ impl ConvertMessage {
 }
 
 fn main() {
+    let wav_path = format!(
+        "{}{}",
+        std::env::current_dir().unwrap().display(),
+        "/target/recorded.wav"
+    );
     let mut recorder = CpalRecorder::default();
-    let output_format = CpalRecorder::output_format().expect("Failed to get default audio config");
     let (tx, rx) = channel();
     let output = audio::recorder::ChannelRecorderOutput { sender: tx };
     let wav = Arc::new(Mutex::new(Some(Wav::new(
-        PATH,
+        &wav_path,
         &OutputFormat {
             sample_format: RecorderSampleFormat::I16,
-            ..output_format
+            channels: 1,
+            sample_rate: 48000,
         },
     ))));
     let wav_cloned = Arc::clone(&wav);
@@ -123,7 +126,7 @@ fn main() {
     let mut wav = wav.lock().expect("Failed to lock WAV writer");
     if let Some(wav) = wav.take() {
         wav.save().expect("Failed to save WAV file");
-        println!("WAV file saved to {}", PATH);
+        println!("WAV file saved to {}", wav_path);
     } else {
         eprintln!("WAV writer was already taken");
     }
