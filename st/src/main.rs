@@ -52,43 +52,22 @@ fn main() {
         "/target/recorded.wav"
     );
     let mut recorder = CpalRecorder::default();
+    let recorder_format = CpalRecorder::output_format();
     let (tx, rx) = channel();
     let output = audio::recorder::ChannelRecorderOutput { sender: tx };
     let wav = Arc::new(Mutex::new(Some(Wav::new(
         &wav_path,
-        &OutputFormat {
-            sample_format: RecorderSampleFormat::I16,
-            channels: 1,
-            sample_rate: 48000,
-        },
+        &recorder_format,
     ))));
     let wav_cloned = Arc::clone(&wav);
 
-    // let (ttx, trx) = tokio::sync::mpsc::channel(1024);
-
-    // spawn(move || {
-    //     let rt = Builder::new_multi_thread()
-    //         .worker_threads(3)
-    //         .enable_all()
-    //         .build()
-    //         .unwrap();
-    //     rt.block_on(async move {
-    //         let api_key = std::env::var("API_KEY").expect("API_KEY 未设置");
-    //         let gummy = Gummy::connect(api_key).await.unwrap();
-    //         match gummy {
-    //             Gummy::Ready(_) => {
-    //                 gummy.start().await.expect("Failed to start Gummy");
-    //             }
-    //             Gummy::Processing(_) => {
-    //                 gummy.bind(trx).await.expect("Failed to bind Gummy");
-    //             }
-    //             Gummy::Closed => panic!("Gummy connection closed unexpectedly"),
-    //             Gummy::Error(err) => panic!("Failed to connect: {}", err),
-    //         };
-    //     });
-    // });
-
     spawn(move || {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+       
+        let gummy = rt.block_on(async {
+            Gummy::connect("api_key".to_string()).await.unwrap()
+        });
+        let mut buffer = Vec::new();
         while let Ok(data) = rx.recv() {
             println!(
                 "[{}] Received {} bytes of audio data",
@@ -97,27 +76,35 @@ fn main() {
             );
 
             if let Ok(mut wav) = wav_cloned.lock() {
-                if let Some(ref mut wav) = *wav {
+                if let Some(wav) = wav.as_mut() {
                     wav.write::<i16, i16>(&data)
                         .expect("Failed to write to WAV");
                 }
             } else {
                 eprintln!("Failed to lock WAV writer");
             }
-
-            let mut bytes = Vec::with_capacity(data.len() * 2);
-            for &sample in data.iter() {
-                bytes.extend_from_slice(&sample.to_ne_bytes());
+            buffer.extend_from_slice(&data);
+            let duration_per_sample: f32 = recorder_format.sample_rate as f32
+                * (recorder_format.sample_format.sample_size()) as f32
+                * recorder_format.channels as f32;
+            println!("Duration per sample: {} bytes", duration_per_sample);
+            let buffer_duration = buffer.len() as f32 / duration_per_sample;
+            println!("Buffer duration: {} s", buffer_duration);
+            if buffer_duration >= 0.1 {
+                println!("Buffer duration exceeded 100ms, processing...");
+                // Here you can process the buffer, e.g., send to Gummy
+                rt.block_on(async {
+              
+                    // gummy.send_data(&buffer.iter().map(|s|s.to_le_bytes()).flatten().collect::<Vec<u8>>()).await.unwrap();
+                    // gummy.finish_task().await.unwrap();
+                    println!("Processing buffer with {} samples", buffer.len());
+                });
+                buffer.clear(); // Clear the buffer after processing
             }
-            // Builder::new_current_thread()
-            //     .enable_all()
-            //     .build()
-            //     .unwrap()
-            //     .block_on(async {
-            //         ttx.send(bytes).await.expect("Failed to send data to Gummy");
-            //     })
         }
     });
+
+    
 
     recorder.start(output).expect("Failed to start recorder");
     println!("Recorder started, waiting for audio data...");
@@ -130,4 +117,5 @@ fn main() {
     } else {
         eprintln!("WAV writer was already taken");
     }
+    sleep(Duration::from_secs(30));
 }

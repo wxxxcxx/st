@@ -39,7 +39,7 @@ impl RecorderOutput for ChannelRecorderOutput {
         self.sender.send(data).map_err(|_| RecorderError::Unknown)
     }
 }
-
+#[derive(Clone, Debug)]
 pub struct OutputFormat {
     pub channels: RecorderChannelCount,
     pub sample_rate: RecorderSampleRate,
@@ -47,6 +47,7 @@ pub struct OutputFormat {
 }
 
 pub trait Recorder {
+    fn output_format() -> OutputFormat;
     fn start(&mut self, output: ChannelRecorderOutput) -> RecorderResult<()>;
     fn stop(&mut self) -> RecorderResult<()>;
 }
@@ -90,6 +91,13 @@ impl CpalRecorder {
 }
 
 impl Recorder for CpalRecorder {
+    fn output_format() -> OutputFormat {
+        OutputFormat {
+            channels: 1,
+            sample_rate: 48000,
+            sample_format: cpal::SampleFormat::I16,
+        }
+    }
     fn start(&mut self, output: ChannelRecorderOutput) -> RecorderResult<()> {
         if self.stream.is_some() {
             return Err(RecorderError::Unknown);
