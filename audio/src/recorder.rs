@@ -1,10 +1,7 @@
-use std::default;
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
-
+use cpal::Sample;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Sample, SampleRate, StreamConfig};
-use hound::SampleFormat;
+use log::{debug, error};
+use std::sync::mpsc::Sender;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -17,6 +14,8 @@ pub enum RecorderError {
     PlayStreamError(#[from] cpal::PlayStreamError),
     #[error("Failed to stop audio recorder: {0}")]
     PauseStreamError(#[from] cpal::PauseStreamError),
+    #[error("Failed to send audio data: {0}")]
+    SenderError(#[from] std::sync::mpsc::SendError<Vec<i16>>),
     #[error("Unknown error")]
     Unknown,
 }
@@ -36,7 +35,7 @@ pub struct ChannelRecorderOutput {
 }
 impl RecorderOutput for ChannelRecorderOutput {
     fn on_data(&self, data: Vec<i16>) -> RecorderResult<()> {
-        self.sender.send(data).map_err(|_| RecorderError::Unknown)
+        Ok(self.sender.send(data)?)
     }
 }
 #[derive(Clone, Debug)]
@@ -104,7 +103,7 @@ impl Recorder for CpalRecorder {
         }
         let (device, config) = CpalRecorder::get_default_device()?;
 
-        println!(
+        debug!(
             "Using device: {} config: {} channels, {} Hz, {:?}",
             device.name().unwrap_or_else(|_| "Unknown".to_string()),
             config.channels(),
@@ -131,11 +130,11 @@ impl Recorder for CpalRecorder {
                     })
                     .collect::<Vec<i16>>();
                 if let Err(e) = output.on_data(sample_data) {
-                    eprintln!("Error sending data to output: {}", e);
+                    error!("Error sending data to output: {}", e);
                 }
             },
             |err| {
-                eprintln!("Error occurred on input stream: {}", err);
+                error!("Error occurred on input stream: {}", err);
             },
             None,
         )?;
@@ -146,7 +145,7 @@ impl Recorder for CpalRecorder {
     }
 
     fn stop(&mut self) -> RecorderResult<()> {
-        println!("Stopping recorder...");
+        debug!("Stopping recorder...");
         if let Some(stream) = self.stream.take() {
             stream.pause()?;
             self.stream = None;

@@ -1,8 +1,5 @@
 use std::fs::File;
 use std::io::BufWriter;
-use std::ops::DerefMut;
-use std::sync::{Arc, Mutex};
-use std::vec;
 
 use cpal::{FromSample, Sample};
 use hound::WavWriter;
