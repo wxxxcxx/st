@@ -15,41 +15,6 @@ use tokio::runtime::Builder;
 
 mod gummy;
 
-#[derive(Serialize, Deserialize)]
-pub struct ConvertMessageHeader {
-    task_id: String,
-    action: String,
-    streaming: String,
-}
-
-impl ConvertMessageHeader {
-    pub fn new(action: String) -> Self {
-        let task_id = uuid::Uuid::new_v4().to_string();
-        ConvertMessageHeader {
-            task_id,
-            action,
-            streaming: "duplex".to_string(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ConvertMessagePayload {}
-#[derive(Serialize, Deserialize)]
-pub struct ConvertMessage {
-    header: ConvertMessageHeader,
-    payload: ConvertMessagePayload,
-}
-
-impl ConvertMessage {
-    pub fn new(event: String) -> Self {
-        ConvertMessage {
-            header: ConvertMessageHeader::new(event),
-            payload: ConvertMessagePayload {},
-        }
-    }
-}
-
 fn main() {
     env_logger::init();
     let wav_path = format!(

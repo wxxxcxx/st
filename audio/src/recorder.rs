@@ -52,12 +52,16 @@ pub trait Recorder {
 }
 
 pub struct CpalRecorder {
-    stream: Option<cpal::Stream>,
+    input_stream: Option<cpal::Stream>,
+    output_stream: Option<cpal::Stream>,
 }
 
 impl Default for CpalRecorder {
     fn default() -> Self {
-        CpalRecorder { stream: None }
+        CpalRecorder {
+            input_stream: None,
+            output_stream: None,
+        }
     }
 }
 
@@ -98,7 +102,7 @@ impl Recorder for CpalRecorder {
         }
     }
     fn start(&mut self, output: ChannelRecorderOutput) -> RecorderResult<()> {
-        if self.stream.is_some() {
+        if self.input_stream.is_some() {
             return Err(RecorderError::Unknown);
         }
         let (device, config) = CpalRecorder::get_default_device()?;
@@ -110,7 +114,17 @@ impl Recorder for CpalRecorder {
             config.sample_rate().0,
             config.sample_format()
         );
-
+        let output_config = device.default_output_config().unwrap();
+        let output_stream = device.build_output_stream(
+            &output_config.config(),
+            move |data: &mut [f32], _| {
+                for sample in data {
+                    *sample = 0.0;
+                }
+            },
+            |_| {},
+            None,
+        )?;
         let stream = device.build_input_stream(
             &config.config(),
             move |data: &[f32], _| {
@@ -138,17 +152,22 @@ impl Recorder for CpalRecorder {
             },
             None,
         )?;
-
+        output_stream.play()?;
         stream.play()?;
-        self.stream = Some(stream);
+        self.input_stream = Some(stream);
+        self.output_stream = Some(output_stream);
         Ok(())
     }
 
     fn stop(&mut self) -> RecorderResult<()> {
         debug!("Stopping recorder...");
-        if let Some(stream) = self.stream.take() {
+        if let Some(stream) = self.input_stream.take() {
             stream.pause()?;
-            self.stream = None;
+            self.input_stream = None;
+        }
+        if let Some(output_stream) = self.output_stream.take() {
+            output_stream.pause()?;
+            self.output_stream = None;
         }
         Ok(())
     }
