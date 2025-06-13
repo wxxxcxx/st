@@ -105,7 +105,7 @@ fn main() {
                     count += buffer_duration;
                 }
                 debug!("Count is now: {}", count);
-                if count > 5.0 {
+                if count > 10.0 {
                     let received_gummy = gummy.finish().await.unwrap();
                     debug!(
                         "[{}] Gummy task finished with ID: {:?}",
@@ -121,8 +121,9 @@ fn main() {
 
     recorder.start(output).expect("Failed to start recorder");
     debug!("Recorder started, waiting for audio data...");
-    sleep(Duration::from_secs(11));
+    sleep(Duration::from_secs(20));
     recorder.stop().expect("Failed to stop recorder");
+    sleep(Duration::from_secs(10));
     let mut wav = wav.lock().expect("Failed to lock WAV writer");
     if let Some(wav) = wav.take() {
         wav.save().expect("Failed to save WAV file");

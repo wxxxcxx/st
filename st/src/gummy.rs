@@ -1,6 +1,7 @@
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use log::debug;
+use log::{debug, info};
+use serde::de;
 use std::result::Result::Ok;
 use std::vec;
 use tokio_tungstenite::{WebSocketStream, connect_async_tls_with_config};
@@ -8,8 +9,6 @@ use tungstenite::Message;
 use tungstenite::client::IntoClientRequest;
 
 mod request {
-    use chrono::format;
-    use dasp::sample;
     use serde::Deserialize;
     use serde::Serialize;
 
@@ -137,17 +136,27 @@ pub struct Connected {
     reader: WSReader,
 }
 
-pub struct Sending {
-    writer: WSWriter,
-    reader: WSReader,
-    task_id: String,
+#[derive(Debug, Clone)]
+pub struct Transcription {
+    pub begin_time: u64,
+    pub end_time: u64,
+    pub text: String,
+    pub translated_text: Option<String>,
 }
 
-pub struct Received {
+pub struct Converting {
     writer: WSWriter,
     reader: WSReader,
     task_id: String,
-    result: Vec<String>,
+    result: Vec<Transcription>,
+    finished: bool,
+}
+
+pub struct Finished {
+    writer: WSWriter,
+    reader: WSReader,
+    task_id: String,
+    result: Vec<Transcription>,
 }
 
 pub struct Gummy<State = Closed> {
@@ -201,7 +210,7 @@ impl Gummy<Connected> {
         sample_rate: Option<u32>,
         source_language: Option<&str>,
         target_language: Option<&str>,
-    ) -> Result<Gummy<Sending>, anyhow::Error> {
+    ) -> Result<Gummy<Converting>, anyhow::Error> {
         let start_message =
             request::StartMessage::new(format, sample_rate, source_language, target_language);
         self.state
@@ -240,10 +249,12 @@ impl Gummy<Connected> {
                 }
             }
         }
-        let state = Sending {
+        let state = Converting {
             writer: self.state.writer,
             reader: self.state.reader,
             task_id: start_message.id().to_string(),
+            result: vec![],
+            finished: false,
         };
         Ok(Gummy {
             api_key: self.api_key,
@@ -252,7 +263,7 @@ impl Gummy<Connected> {
     }
 }
 
-impl Gummy<Sending> {
+impl Gummy<Converting> {
     pub async fn send(&mut self, data: &[u8]) -> Result<(), anyhow::Error> {
         self.state
             .writer
@@ -261,23 +272,13 @@ impl Gummy<Sending> {
         Ok(())
     }
 
-    pub async fn finish(mut self) -> Result<Gummy<Received>, anyhow::Error> {
-        let message = request::FinishMessage::new(&self.state.task_id);
-        self.state
-            .writer
-            .send(Message::Text(
-                serde_json::to_string(&message).unwrap().into(),
-            ))
-            .await?;
-        let mut result = vec![];
-        while let Some(message) = self.state.reader.next().await {
+    pub async fn receive(&mut self) -> Result<Vec<Transcription>, anyhow::Error> {
+        if self.state.finished {
+            return Ok(self.state.result.clone());
+        }
+        if let Some(message) = self.state.reader.next().await {
             match message {
                 Ok(Message::Text(text)) => {
-                    debug!(
-                        "[{}] Received message: {}",
-                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                        text
-                    );
                     let response: serde_json::Value = serde_json::from_str(&text)?;
                     let event = response["header"]["event"]
                         .as_str()
@@ -286,25 +287,51 @@ impl Gummy<Sending> {
                         .as_str()
                         .expect("Missing task_id in response")
                         .to_string();
-
                     if event == "result-generated" && task_id == self.state.task_id {
-                        let sentence_end =
-                            response["payload"]["output"]["transcription"]["sentence_end"]
-                                .as_bool()
-                                .expect("Missing sentence_end in response");
-                        let text = response["payload"]["output"]["transcription"]["text"]
-                            .as_str()
-                            .expect("Missing text in response")
-                            .to_string();
-                        debug!("Received translation: {}", text);
-                        result.push(text);
+                        let transcription_json = response["payload"]["output"]["transcription"]
+                            .as_object()
+                            .unwrap();
+                        let sentence_id = transcription_json["sentence_id"].as_u64().unwrap();
+                        let begin_time = transcription_json["begin_time"].as_u64().unwrap();
+                        let end_time = transcription_json["end_time"].as_u64().unwrap();
+                        let text = transcription_json["text"].as_str().unwrap().to_string();
+                        let sentence_end = transcription_json["sentence_end"]
+                            .as_bool()
+                            .expect("Missing sentence_end in response");
+
+                        let translation_json =
+                            response["payload"]["output"]["translation"].as_object();
+                        let translated_text = match translation_json {
+                            Some(translation) => {
+                                Some(translation["text"].as_str().unwrap().to_string())
+                            }
+                            None => None,
+                        };
+
+                        match self.state.result.get_mut(sentence_id as usize) {
+                            Some(transcription) => {
+                                transcription.text = text;
+                                transcription.begin_time = begin_time;
+                                transcription.end_time = end_time;
+                                transcription.translated_text = translated_text;
+                            }
+                            None => {
+                                self.state.result.push(Transcription {
+                                    begin_time,
+                                    end_time,
+                                    text,
+                                    translated_text: translated_text,
+                                });
+                            }
+                        }
+
                         if sentence_end {
                             debug!("Sentence ended, stopping.");
                         }
                     }
                     if event == "task-finished" && task_id == self.state.task_id {
                         debug!("Task finished with ID: {}", task_id);
-                        break;
+                        self.state.finished = true;
                     }
                 }
                 Err(e) => {
@@ -314,10 +341,92 @@ impl Gummy<Sending> {
                     debug!("Received non-text message, ignoring.");
                 }
             }
+        };
+
+        Ok(self.state.result.clone())
+    }
+
+    pub async fn finish(mut self) -> Result<Gummy<Finished>, anyhow::Error> {
+        if !self.state.finished {
+            let message = request::FinishMessage::new(&self.state.task_id);
+            self.state
+                .writer
+                .send(Message::Text(
+                    serde_json::to_string(&message).unwrap().into(),
+                ))
+                .await?;
+            while let Some(message) = self.state.reader.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        let response: serde_json::Value = serde_json::from_str(&text)?;
+                        let event = response["header"]["event"]
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
+                        let task_id = response["header"]["task_id"]
+                            .as_str()
+                            .expect("Missing task_id in response")
+                            .to_string();
+                        if event == "result-generated" && task_id == self.state.task_id {
+                            let transcription_json = response["payload"]["output"]["transcription"]
+                                .as_object()
+                                .unwrap();
+                            let sentence_id = transcription_json["sentence_id"].as_u64().unwrap();
+                            let begin_time = transcription_json["begin_time"].as_u64().unwrap();
+                            let end_time = transcription_json["end_time"].as_u64().unwrap();
+                            let text = transcription_json["text"].as_str().unwrap().to_string();
+                            let sentence_end = transcription_json["sentence_end"]
+                                .as_bool()
+                                .expect("Missing sentence_end in response");
+
+                            let translation_json =
+                                response["payload"]["output"]["translation"].as_object();
+                            let translated_text = match translation_json {
+                                Some(translation) => {
+                                    Some(translation["text"].as_str().unwrap().to_string())
+                                }
+                                None => None,
+                            };
+                            info!("Text:{}", text);
+                            info!("Translation:{:?}", translated_text);
+                            match self.state.result.get_mut(sentence_id as usize) {
+                                Some(transcription) => {
+                                    transcription.text = text;
+                                    transcription.begin_time = begin_time;
+                                    transcription.end_time = end_time;
+                                    transcription.translated_text = translated_text;
+                                }
+                                None => {
+                                    self.state.result.push(Transcription {
+                                        begin_time,
+                                        end_time,
+                                        text,
+                                        translated_text,
+                                    });
+                                }
+                            }
+                            if sentence_end {
+                                debug!("Sentence ended, stopping.");
+                            }
+                        }
+                        if event == "task-finished" && task_id == self.state.task_id {
+                            debug!("Task finished with ID: {}", task_id);
+                            self.state.finished = true;
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Error receiving message: {}", e));
+                    }
+                    _ => {
+                        debug!("Received non-text message, ignoring.");
+                    }
+                }
+            }
         }
-        let state = Received {
+
+        let state = Finished {
             task_id: self.state.task_id,
-            result: result, // Placeholder for result
+            result: self.state.result,
             writer: self.state.writer,
             reader: self.state.reader,
         };
@@ -329,14 +438,14 @@ impl Gummy<Sending> {
     }
 }
 
-impl Gummy<Received> {
+impl Gummy<Finished> {
     pub async fn start(
         mut self,
         format: Option<&str>,
         sample_rate: Option<u32>,
         source_language: Option<&str>,
         target_language: Option<&str>,
-    ) -> Result<Gummy<Sending>, anyhow::Error> {
+    ) -> Result<Gummy<Converting>, anyhow::Error> {
         let message =
             request::StartMessage::new(format, sample_rate, source_language, target_language);
         self.state
@@ -345,10 +454,12 @@ impl Gummy<Received> {
                 serde_json::to_string(&message).unwrap().into(),
             ))
             .await?;
-        let state = Sending {
+        let state = Converting {
             writer: self.state.writer,
             reader: self.state.reader,
             task_id: self.state.task_id.clone(),
+            result: vec![],
+            finished: false,
         };
         Ok(Gummy {
             api_key: self.api_key,
@@ -356,7 +467,7 @@ impl Gummy<Received> {
         })
     }
 
-    pub fn get_result(&self) -> Vec<String> {
+    pub fn get_result(&self) -> Vec<Transcription> {
         self.state.result.clone()
     }
 }
