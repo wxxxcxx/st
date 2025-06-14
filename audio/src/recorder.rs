@@ -1,8 +1,9 @@
 use cpal::Sample;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error};
-use std::sync::mpsc::Sender;
+use std::time::SystemTime;
 use thiserror::Error;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 #[derive(Error, Debug)]
 pub enum RecorderError {
@@ -26,18 +27,6 @@ pub type RecorderChannelCount = u16;
 pub type RecorderSampleRate = u32;
 pub type RecorderSampleFormat = cpal::SampleFormat;
 
-pub trait RecorderOutput {
-    fn on_data(&self, data: Vec<i16>) -> RecorderResult<()>;
-}
-
-pub struct ChannelRecorderOutput {
-    pub sender: Sender<Vec<i16>>,
-}
-impl RecorderOutput for ChannelRecorderOutput {
-    fn on_data(&self, data: Vec<i16>) -> RecorderResult<()> {
-        Ok(self.sender.send(data)?)
-    }
-}
 #[derive(Clone, Debug)]
 pub struct OutputFormat {
     pub channels: RecorderChannelCount,
@@ -45,23 +34,26 @@ pub struct OutputFormat {
     pub sample_format: RecorderSampleFormat,
 }
 
-pub trait Recorder {
-    fn output_format() -> OutputFormat;
-    fn start(&mut self, output: ChannelRecorderOutput) -> RecorderResult<()>;
-    fn stop(&mut self) -> RecorderResult<()>;
+pub struct SampleData {
+    pub data: Vec<i16>,
+    pub timestamp: u64,
 }
 
-pub struct CpalRecorder {
-    input_stream: Option<cpal::Stream>,
-    output_stream: Option<cpal::Stream>,
+pub struct Started {
+    input_stream: cpal::Stream,
+    output_stream: cpal::Stream,
+    sample_data_receiver: UnboundedReceiver<SampleData>,
+}
+
+pub struct Stopped;
+
+pub struct CpalRecorder<State = Stopped> {
+    state: State,
 }
 
 impl Default for CpalRecorder {
     fn default() -> Self {
-        CpalRecorder {
-            input_stream: None,
-            output_stream: None,
-        }
+        CpalRecorder { state: Stopped }
     }
 }
 
@@ -91,22 +83,18 @@ impl CpalRecorder {
             return Ok((device, config));
         }
     }
-}
-
-impl Recorder for CpalRecorder {
-    fn output_format() -> OutputFormat {
+    pub fn output_format() -> OutputFormat {
         OutputFormat {
             channels: 1,
             sample_rate: 48000,
             sample_format: cpal::SampleFormat::I16,
         }
     }
-    fn start(&mut self, output: ChannelRecorderOutput) -> RecorderResult<()> {
-        if self.input_stream.is_some() {
-            return Err(RecorderError::Unknown);
-        }
-        let (device, config) = CpalRecorder::get_default_device()?;
+}
 
+impl CpalRecorder<Stopped> {
+    pub fn start(self) -> RecorderResult<CpalRecorder<Started>> {
+        let (device, config) = CpalRecorder::get_default_device()?;
         debug!(
             "Using device: {} config: {} channels, {} Hz, {:?}",
             device.name().unwrap_or_else(|_| "Unknown".to_string()),
@@ -125,6 +113,7 @@ impl Recorder for CpalRecorder {
             |_| {},
             None,
         )?;
+        let (tx, rx) = unbounded_channel();
         let stream = device.build_input_stream(
             &config.config(),
             move |data: &[f32], _| {
@@ -137,15 +126,21 @@ impl Recorder for CpalRecorder {
                         .collect();
                 }
                 // Process audio data here
-                let sample_data = data
+                let raw_sample_data = data
                     .iter()
                     .map(|&s| {
                         return i16::from_sample(s.clone());
                     })
                     .collect::<Vec<i16>>();
-                if let Err(e) = output.on_data(sample_data) {
-                    error!("Error sending data to output: {}", e);
-                }
+                let sample_data = SampleData {
+                    data: raw_sample_data,
+                    timestamp: SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64,
+                };
+                tx.send(sample_data)
+                    .expect("Failed to send data to channel");
             },
             |err| {
                 error!("Error occurred on input stream: {}", err);
@@ -154,21 +149,24 @@ impl Recorder for CpalRecorder {
         )?;
         output_stream.play()?;
         stream.play()?;
-        self.input_stream = Some(stream);
-        self.output_stream = Some(output_stream);
-        Ok(())
+        let state = Started {
+            input_stream: stream,
+            output_stream: output_stream,
+            sample_data_receiver: rx,
+        };
+        Ok(CpalRecorder { state })
+    }
+}
+
+impl CpalRecorder<Started> {
+    pub async fn reveice_sample_data(&mut self) -> Option<SampleData> {
+        return self.state.sample_data_receiver.recv().await;
     }
 
-    fn stop(&mut self) -> RecorderResult<()> {
+    pub fn stop(self) -> RecorderResult<CpalRecorder<Stopped>> {
         debug!("Stopping recorder...");
-        if let Some(stream) = self.input_stream.take() {
-            stream.pause()?;
-            self.input_stream = None;
-        }
-        if let Some(output_stream) = self.output_stream.take() {
-            output_stream.pause()?;
-            self.output_stream = None;
-        }
-        Ok(())
+        self.state.input_stream.pause()?;
+        self.state.output_stream.pause()?;
+        Ok(CpalRecorder { state: Stopped })
     }
 }

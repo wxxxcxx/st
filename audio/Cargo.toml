@@ -9,3 +9,4 @@ thiserror = "2.0.12"
 cpal = { git = "https://github.com/Kree0/cpal.git", branch = "master" }
 hound = "3.5.1"
 log = "0.4.27"
+tokio = "1.45.1"

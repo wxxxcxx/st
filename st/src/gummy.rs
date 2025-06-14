@@ -367,6 +367,7 @@ impl Gummy<Converting> {
                             .expect("Missing task_id in response")
                             .to_string();
                         if event == "result-generated" && task_id == self.state.task_id {
+                            // debug!("Received result {}", response);
                             let transcription_json = response["payload"]["output"]["transcription"]
                                 .as_object()
                                 .unwrap();
@@ -377,16 +378,15 @@ impl Gummy<Converting> {
                             let sentence_end = transcription_json["sentence_end"]
                                 .as_bool()
                                 .expect("Missing sentence_end in response");
-
                             let translation_json =
-                                response["payload"]["output"]["translation"].as_object();
+                                response["payload"]["output"]["translations"][0].as_object();
                             let translated_text = match translation_json {
                                 Some(translation) => {
                                     Some(translation["text"].as_str().unwrap().to_string())
                                 }
                                 None => None,
                             };
-                            info!("Text:{}", text);
+                            info!("Text({}):{}", sentence_end, text);
                             info!("Translation:{:?}", translated_text);
                             match self.state.result.get_mut(sentence_id as usize) {
                                 Some(transcription) => {
