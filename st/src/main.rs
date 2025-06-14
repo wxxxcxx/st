@@ -37,12 +37,11 @@ async fn main() {
 
     loop {
         select! {
-            sample_data= recorder.reveice_sample_data() => {
-                if let Some(data) = sample_data {
-                    // debug!("Received sample data: {}", data.data.len());
+            sample_data_result= recorder.reveice_sample_data() => {
+                if let Some(sample_data) = sample_data_result {
                     gummy
                         .send(
-                            &data.data
+                            &sample_data.data
                                 .iter()
                                 .map(|s| s.to_le_bytes())
                                 .flatten()
@@ -52,8 +51,8 @@ async fn main() {
                         .unwrap();
                 }
             },
-            result = gummy.receive() => {
-                if let Ok(data) = result {
+            recognition_result = gummy.receive() => {
+                if let Ok(data) = recognition_result {
                     debug!("Received recognition result: {}", data.len());
                     debug!("Message: {:?}",  data);
                     
